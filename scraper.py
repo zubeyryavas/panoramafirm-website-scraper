@@ -1,138 +1,84 @@
-from playwright.sync_api import sync_playwright, TimeoutError
+from playwright.sync_api import sync_playwright
 import csv
 import time
 
+BASE_URL = "https://panoramafirm.pl"
+LISTING_BASE_URL = BASE_URL + "/salony_spa_i_odnowa_biologiczna/firmy,"
+
 SELECTORS = {
-    "company_list": "#company-list > li",
+    "company_cards": "#company-list > li",
     "name_link": "div.row.border-bottom.company-top-content.pb-1 > div.col-8.col-sm-10 > h2 > a",
     "name_link_optional": "div.row.border-bottom.company-top-content.pb-1 > div > h2 > a",
-    "phone_modal_title": "#phone-modal .modal-header.text-dark .modal-title.w-100.font-weight-bold.text-dark",
-    "sections": "#sections",
+    "inline_phone": "div:nth-child(1) > a.icon-telephone",
+    "inline_website": "div:nth-child(2) > a.icon-website",
+    "inline_email": "div:nth-child(3) > a.icon-envelope"
 }
 
-def get_contact_detail_by_label(detail_page, label_text):
-    try:
-        label_elem = detail_page.query_selector(f'text="{label_text}"')
-        if not label_elem:
-            return None, None
+def extract_inline_details(company):
+    phone_el = company.query_selector(SELECTORS["inline_phone"])
+    phone = phone_el.get_attribute("data-original-title").strip() if phone_el and phone_el.get_attribute("data-original-title") else "N/A"
 
-        container = label_elem.evaluate_handle("el => el.closest('.row')")
-        if container:
-            value_elem = container.query_selector("a") or container.query_selector("div")
-            if value_elem:
-                return value_elem.inner_text().strip(), value_elem
-    except Exception as e:
-        print(f"⚠️ Error getting contact detail '{label_text}': {e}")
-    return None, None
+    website_el = company.query_selector(SELECTORS["inline_website"])
+    website = website_el.get_attribute("href").strip() if website_el and website_el.get_attribute("href") else "N/A"
 
-def scrape_company(detail_page, base_url, company, i):
-    try:
-        name_a = company.query_selector(SELECTORS["name_link"]) or company.query_selector(SELECTORS["name_link_optional"])
-        if not name_a:
-            print(f"[{i}] No name/link found, skipping")
-            return None
+    email_el = company.query_selector(SELECTORS["inline_email"])
+    email = email_el.get_attribute("data-company-email").strip() if email_el and email_el.get_attribute("data-company-email") else "N/A"
 
-        name = name_a.inner_text().strip()
-        link = name_a.get_attribute("href")
-        if not link:
-            print(f"[{i}] No href found for {name}, skipping")
-            return None
+    return phone, email, website
 
-        detail_url = link if link.startswith("http") else base_url + link
-        print(f"[{i}] Scraping details for: {name} - {detail_url}")
 
-        detail_page.goto(detail_url, wait_until="load")
-        detail_page.wait_for_selector(SELECTORS["sections"])
-
-        # Phone
-        phone, phone_el = get_contact_detail_by_label(detail_page, "Telefon")
-        if phone_el:
-            try:
-                phone_el.scroll_into_view_if_needed()
-                time.sleep(0.2)
-                detail_page.evaluate("(el) => el.click()", phone_el)
-                time.sleep(0.5)
-                detail_page.wait_for_selector(SELECTORS["phone_modal_title"], timeout=10000)
-                full_phone_el = detail_page.query_selector(SELECTORS["phone_modal_title"])
-                if full_phone_el:
-                    full_number = full_phone_el.inner_text().strip()
-                    if full_number:
-                        phone = full_number
-                    else:
-                        print(f"[{i}] ⚠️ Modal opened but phone number is missing")
-                else:
-                    print(f"[{i}] ❌ Modal selector not found")
-                detail_page.keyboard.press("Escape")
-                time.sleep(0.3)
-            except TimeoutError:
-                print(f"[{i}] ⏱️ Timeout while waiting for full phone modal")
-            except Exception as e:
-                print(f"[{i}] ❌ Error clicking phone element: {e}")
-        else:
-            phone = "N/A"
-            print(f"[{i}] ⚠️ No phone found")
-
-        # Email
-        email, _ = get_contact_detail_by_label(detail_page, "Email")
-        email = email or "N/A"
-
-        # Website
-        website, website_el = get_contact_detail_by_label(detail_page, "Strona www")
-        if website_el:
-            href = website_el.get_attribute("href")
-            website = href or website
-        else:
-            website = website or "N/A"
-
-        return {
-            "Name": name,
-            "Phone": phone,
-            "Email": email,
-            "Website": website,
-        }
-    except Exception as e:
-        print(f"[{i}] ❌ Error scraping company details: {e}")
-        return None
+def get_name_and_link(company):
+    name_a = company.query_selector(SELECTORS["name_link"]) or company.query_selector(SELECTORS["name_link_optional"])
+    if not name_a:
+        return None, None
+    name = name_a.inner_text().strip()
+    link = name_a.get_attribute("href")
+    return name, link
 
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        detail_page = browser.new_page()
-        base_url = "https://panoramafirm.pl"
         data = []
         seen_contacts = set()
-        company_counter = 1
 
-        for page_number in range(132, 133):  # You can increase this range
-            listing_url = f"{base_url}/hotele/firmy,{page_number}.html"
-            print(f"Scraping listing page {page_number}: {listing_url}")
-            page.goto(listing_url)
-            page.wait_for_selector(SELECTORS["company_list"])
+        max_pages = 192  # Change this to the number of pages you want
 
-            companies = page.query_selector_all(SELECTORS["company_list"])
+        for page_num in range(1, max_pages + 1):
+            print(f"📄 Visiting page {page_num}")
+            page.goto(f"{LISTING_BASE_URL}{page_num}.html", timeout=30000)
+            page.wait_for_selector(SELECTORS["company_cards"])
+            companies = page.query_selector_all(SELECTORS["company_cards"])
 
             for company in companies:
-                result = scrape_company(detail_page, base_url, company, company_counter)
-                if result:
-                    contact_key = (result["Email"], result["Phone"])
-                    if contact_key not in seen_contacts:
-                        data.append(result)
-                        seen_contacts.add(contact_key)
-                    else:
-                        print(f"[{company_counter}] ⚠️ Duplicate found, skipping: {contact_key}")
-                company_counter += 1
-                page.wait_for_timeout(100)  # polite delay
+                name, link = get_name_and_link(company)
+                if not name:
+                    continue
 
-        detail_page.close()
+                phone, email, website = extract_inline_details(company)
+                contact_key = (email, phone)
+
+                if contact_key not in seen_contacts:
+                    data.append({
+                        "Name": name,
+                        "Phone": phone,
+                        "Email": email,
+                        "Website": website
+                    })
+                    seen_contacts.add(contact_key)
+                else:
+                    print(f"⚠️ Duplicate found, skipping: {contact_key}")
+
+                time.sleep(0.1)
+
         browser.close()
 
-        with open("hotels.csv", "w", encoding="utf-8", newline="") as f:
+        with open("spa_and_wellness.csv", "w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["Name", "Phone", "Email", "Website"])
             writer.writeheader()
             writer.writerows(data)
 
-        print(f"✅ Scraped {len(data)} unique hotels from {page_number} page(s) and saved to hotels.csv")
+        print(f"✅ Scraped {len(data)} spa and wellness saloons and saved to spa_and_wellness.csv")
 
 if __name__ == "__main__":
     main()
